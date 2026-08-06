@@ -23,10 +23,13 @@ Literal string search for nginx, and exclusion of requests with no extension, js
 
 ## Changelog
 
-- Unreleased
+- v2.0 (06/08/2026)
   - Results are shown as a per-host tree with one match per row, replacing the `||` joined table cell
   - Result filter box, expand/collapse all, and a right-click copy menu
   - Reworked layout that follows Burp's own theme and fonts
+  - Faster searches: message bodies are scanned in parallel and each message is read once instead of twice
+  - Fixed literal searches being compiled as regular expressions, so terms such as `?` or `cache[` no longer fail silently
+  - Fixed status code, scope and extension filters aborting the rest of the history search
 
 - V1.3 (24/06/2024)
   - Option to stop the search
