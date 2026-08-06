@@ -64,6 +64,7 @@ public class HistoryExplorer {
         if (!httpOptions.get(0) && !httpOptions.get(1)) {
             // Both reqSearch and resSearch are false
             logging.logToOutput("At least one of the HTTP options should be enabled");
+            gui.enableSearchButton();
             return;
         }
 
@@ -100,23 +101,23 @@ public class HistoryExplorer {
             if (item.originalResponse() != null && item.finalRequest() != null) {
 
                 if (!statusFilters.contains(String.valueOf(item.originalResponse().statusCode()).substring(0, 1))) {
-                    return;
+                    continue;
                 }
 
                 if (inScopeSearch) {
                     if (!scope.isInScope(item.url())) {
-                        return;
+                        continue;
                     }
                 }
 
                 String requestExtensionStr = String.valueOf(getExtensionFromPath(item.path()));
 
                 if (excludedExtensions.length > 0 && requestExtensionStr != null && Arrays.asList(excludedExtensions).contains(requestExtensionStr)) {
-                    return;
+                    continue;
                 }
 
                 if (includedExtensions.length > 0 && requestExtensionStr != null && !Arrays.asList(includedExtensions).contains(requestExtensionStr)) {
-                    return;
+                    continue;
                 }
 
                 List<String> matchingValues = new ArrayList<>();
