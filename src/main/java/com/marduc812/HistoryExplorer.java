@@ -35,8 +35,7 @@ public class HistoryExplorer {
         }
 
         // all request filters are disabled
-        List<String> statusFilters = getStatusFilters(searchStatusCodes);
-        if (statusFilters.isEmpty()) {
+        if (noneSelected(searchStatusCodes)) {
             logging.logToOutput("At least one of the Request Response options should be enabled");
             gui.enableSearchButton();
             return;
@@ -69,10 +68,11 @@ public class HistoryExplorer {
         Set<String> excludedExtensions = parseExtensions(excludedExtensionsString);
         Pattern searchPattern = pattern;
 
-        this.executorService = Executors.newFixedThreadPool(4);
+        this.executorService = Executors.newSingleThreadExecutor();
         executorService.submit(() -> {
             try {
-                processHttpHistory(api, gui, searchTerm, searchPattern, inScopeSearch, statusFilters, showProtocol, showPort, includedExtensions, excludedExtensions, searchRequests, searchResponses);
+                FilterHTTPResults filterHTTP = new FilterHTTPResults(searchTerm, searchPattern, searchRequests, searchResponses, searchStatusCodes, scope, inScopeSearch, includedExtensions, excludedExtensions, this::isStopped);
+                processHttpHistory(api, gui, searchTerm, searchPattern, showProtocol, showPort, searchRequests, searchResponses, filterHTTP);
             } catch (Throwable t) {
                 // submit() parks throwables in a Future nobody reads, so without this
                 // the search dies leaving no trace and the button stuck on "Stop".
@@ -81,15 +81,25 @@ public class HistoryExplorer {
                 gui.enableSearchButton();
             }
         });
+
+        // Lets the queued task finish, then reaps the thread. Without it every search
+        // leaks a live non-daemon thread for the rest of the Burp session.
+        executorService.shutdown();
     }
 
     public void stopSearch() {
         stopSearchFlag = true;
     }
 
-    private void processHttpHistory(MontoyaApi api, HistoryExplorerGui gui, String searchTerm, Pattern pattern, boolean inScopeSearch, List<String> statusFilters, boolean showProtocol, boolean showPort, Set<String> includedExtensions, Set<String> excludedExtensions, boolean searchRequests, boolean searchResponses) {
+    private boolean isStopped() {
+        return stopSearchFlag;
+    }
 
-        FilterHTTPResults filterHTTP = new FilterHTTPResults(searchTerm, pattern, searchRequests, searchResponses);
+    private void processHttpHistory(MontoyaApi api, HistoryExplorerGui gui, String searchTerm, Pattern pattern, boolean showProtocol, boolean showPort, boolean searchRequests, boolean searchResponses, FilterHTTPResults filterHTTP) {
+
+        // Every filter now lives in filterHTTP, so each item Burp hands back is
+        // already a confirmed hit. All that is left is extracting the matched text
+        // and grouping it by host.
         List<ProxyHttpRequestResponse> httpHistory = api.proxy().history(filterHTTP);
         Map<String, Set<String>> hostToServersMap = new LinkedHashMap<>();
 
@@ -108,43 +118,7 @@ public class HistoryExplorer {
                 continue;
             }
 
-            HttpResponse response = item.originalResponse();
-
-            // A missing response only disqualifies an item when we need one. There is
-            // no status code to filter on and no response body to search, but the
-            // request is still searchable.
-            if (response == null) {
-                if (!searchRequests) {
-                    continue;
-                }
-            } else if (!statusFilters.contains(String.valueOf(response.statusCode()).substring(0, 1))) {
-                continue;
-            }
-
-            if (inScopeSearch && !scope.isInScope(item.url())) {
-                continue;
-            }
-
-            String requestExtensionStr = getExtensionFromPath(item.path()).toLowerCase(Locale.ROOT);
-
-            if (excludedExtensions.contains(requestExtensionStr)) {
-                continue;
-            }
-
-            if (!includedExtensions.isEmpty() && !includedExtensions.contains(requestExtensionStr)) {
-                continue;
-            }
-
-            Set<String> matchingValues = new LinkedHashSet<>();
-
-            if (searchRequests) {
-                collectMatches(request.toString(), searchTerm, pattern, matchingValues);
-            }
-
-            if (searchResponses && response != null) {
-                collectMatches(response.toString(), searchTerm, pattern, matchingValues);
-            }
-
+            Set<String> matchingValues = collectMatches(item, request, searchTerm, pattern, searchRequests, searchResponses);
             if (matchingValues.isEmpty()) {
                 continue;
             }
@@ -152,10 +126,6 @@ public class HistoryExplorer {
             String hostString = buildHostLabel(request, showProtocol, showPort);
             hostToServersMap.computeIfAbsent(hostString, key -> new LinkedHashSet<>()).addAll(matchingValues);
         }
-
-        httpHistory.clear();
-        httpHistory = null;
-        System.gc();
 
         Map<String, String> newData = new LinkedHashMap<>();
 
@@ -167,13 +137,32 @@ public class HistoryExplorer {
         java.awt.EventQueue.invokeLater(() -> gui.updateTableData(newData));
     }
 
-    private static void collectMatches(String text, String searchTerm, Pattern pattern, Set<String> into) {
+    private static Set<String> collectMatches(ProxyHttpRequestResponse item, HttpRequest request, String searchTerm, Pattern pattern, boolean searchRequests, boolean searchResponses) {
+
+        // A literal search has nothing to extract: the filter already confirmed the
+        // hit and the matched text is the search term itself, so there is no reason
+        // to stringify the message a second time.
         if (pattern == null) {
-            if (text.contains(searchTerm)) {
-                into.add(searchTerm);
-            }
-            return;
+            return Set.of(searchTerm);
         }
+
+        Set<String> matchingValues = new LinkedHashSet<>();
+
+        if (searchRequests) {
+            addMatches(pattern, request.toString(), matchingValues);
+        }
+
+        if (searchResponses) {
+            HttpResponse response = item.originalResponse();
+            if (response != null) {
+                addMatches(pattern, response.toString(), matchingValues);
+            }
+        }
+
+        return matchingValues;
+    }
+
+    private static void addMatches(Pattern pattern, String text, Set<String> into) {
 
         Matcher matcher = pattern.matcher(text);
         while (matcher.find()) {
@@ -222,23 +211,15 @@ public class HistoryExplorer {
         return extensions;
     }
 
-    private List<String> getStatusFilters(boolean[] statusFilter) {
+    private static boolean noneSelected(boolean[] statusFilter) {
 
-        List<String> statusList = new ArrayList<>();
-        if (statusFilter[0]) {
-            statusList.add("2");
-        }
-        if (statusFilter[1]) {
-            statusList.add("3");
-        }
-        if (statusFilter[2]) {
-            statusList.add("4");
-        }
-        if (statusFilter[3]) {
-            statusList.add("5");
+        for (boolean selected : statusFilter) {
+            if (selected) {
+                return false;
+            }
         }
 
-        return statusList;
+        return true;
     }
 
     public static String getExtensionFromPath(String urlPathString) {
