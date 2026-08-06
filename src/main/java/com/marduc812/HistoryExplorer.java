@@ -36,14 +36,14 @@ public class HistoryExplorer {
 
         if (searchTerm == null || searchTerm.isEmpty()) {
             logging.logToOutput("Empty search string");
-            gui.enableSearchButton();
+            gui.searchFinished();
             return;
         }
 
         // all request filters are disabled
         if (noneSelected(searchStatusCodes)) {
             logging.logToOutput("At least one of the Request Response options should be enabled");
-            gui.enableSearchButton();
+            gui.searchFinished();
             return;
         }
 
@@ -52,7 +52,7 @@ public class HistoryExplorer {
         if (!searchRequests && !searchResponses) {
             // Both reqSearch and resSearch are false
             logging.logToOutput("At least one of the HTTP options should be enabled");
-            gui.enableSearchButton();
+            gui.searchFinished();
             return;
         }
 
@@ -65,7 +65,7 @@ public class HistoryExplorer {
                 pattern = Pattern.compile(searchTerm);
             } catch (PatternSyntaxException e) {
                 logging.logToError("Invalid regular expression: " + e.getMessage());
-                gui.enableSearchButton();
+                gui.searchFinished();
                 return;
             }
         }
@@ -84,7 +84,7 @@ public class HistoryExplorer {
                 // the search dies leaving no trace and the button stuck on "Stop".
                 logging.logToError("Search failed: " + t);
             } finally {
-                gui.enableSearchButton();
+                gui.searchFinished();
             }
         });
 

@@ -3,6 +3,7 @@ package com.marduc812;
 import burp.api.montoya.MontoyaApi;
 
 import javax.swing.*;
+import javax.swing.border.Border;
 import javax.swing.border.CompoundBorder;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
@@ -169,6 +170,17 @@ public class HistoryExplorerGui extends JPanel {
     private final JLabel resultSummaryLabel;
     private final JProgressBar searchProgress;
 
+    /**
+     * Everything above the results that must not be edited mid-search, since the
+     * search reads its settings once at the start and would otherwise be running
+     * under options that no longer match what the tab shows. The Stop button is
+     * deliberately not in here.
+     */
+    private final List<JComponent> searchControls = new ArrayList<>();
+
+    /** The titled borders of the option groups, greyed out alongside their contents. */
+    private final List<TitledBorder> groupBorders = new ArrayList<>();
+
     /** The last full result set, kept so the result filter can re-derive the tree. */
     private Map<String, List<String>> results = new LinkedHashMap<>();
 
@@ -199,9 +211,9 @@ public class HistoryExplorerGui extends JPanel {
                 if ("Search".equals(searchBtn.getText())) {
                     // Start the search
                     searchBtn.setText("Stop");
-                    searchInput.setEnabled(false);
                     searchProgress.setVisible(true);
                     resultSummaryLabel.setText("Searching...");
+                    setSearchControlsEnabled(false);
 
                     // Collect search parameters and start a new HistoryExplorer
                     String userInput = searchInput.getText();
@@ -292,6 +304,12 @@ public class HistoryExplorerGui extends JPanel {
         optionsPanel.add(group("Show in host", displayFont, showProtocolCheckBox, showPortCheckBox));
         optionsPanel.add(group("Extensions", displayFont, label("Include", displayFont), includeExtensionsinput,
                 null, label("Exclude", displayFont), excludeExtensionsinput, helpBtn));
+
+        // Collected by walking the tree rather than listed by hand, so an option added
+        // later is disabled during a search without having to remember to add it here.
+        collectSearchControls(optionsPanel);
+        collectGroupBorders(optionsPanel);
+        searchControls.add(searchInput);
 
         // WrapLayout's preferred height depends on the width it is given, so the
         // enclosing BoxLayout has to be asked to measure again after a resize.
@@ -432,23 +450,23 @@ public class HistoryExplorerGui extends JPanel {
         return label;
     }
 
-    // Make the button available when not searching
-    public void enableSearchButton() {
+    /** Hand the tab back to the user. Called by {@link HistoryExplorer} however a search ends. */
+    public void searchFinished() {
         java.awt.EventQueue.invokeLater(() -> {
-            searchInput.setEnabled(true);
             // stopSearch() disables the button while it waits, so re-enable it here too
             // or a search that finishes mid-stop leaves it dead until the timer fires.
             searchBtn.setEnabled(true);
             searchBtn.setText("Search");
             searchProgress.setVisible(false);
+            setSearchControlsEnabled(true);
         });
     }
 
     public void stopSearch() {
         SwingUtilities.invokeLater(() -> {
             searchBtn.setEnabled(false);
-            searchInput.setEnabled(false);
             searchBtn.setText("Stopping...");
+            setSearchControlsEnabled(false);
 
             if (historyExplorer != null) {
                 historyExplorer.stopSearch();
@@ -460,14 +478,65 @@ public class HistoryExplorerGui extends JPanel {
                     SwingUtilities.invokeLater(() -> {
                         searchBtn.setEnabled(true);
                         searchBtn.setText("Search");
-                        searchInput.setEnabled(true);
                         searchProgress.setVisible(false);
+                        setSearchControlsEnabled(true);
                     });
                 }
             });
             timer.setRepeats(false);
             timer.start();
         });
+    }
+
+    /**
+     * Greys out every search option, leaving the button — by then reading "Stop" — as
+     * the only live control above the results. The results filter stays usable, since
+     * it only re-reads what the previous search already produced.
+     */
+    private void setSearchControlsEnabled(boolean enabled) {
+
+        for (JComponent control : searchControls) {
+            control.setEnabled(enabled);
+        }
+
+        // Swing does not propagate setEnabled to children, and a titled border is not
+        // a child at all, so the group captions have to be greyed out by hand.
+        Color titleColor = enabled
+                ? UIManager.getColor("TitledBorder.titleColor")
+                : UIManager.getColor("Label.disabledForeground");
+
+        if (titleColor != null) {
+            for (TitledBorder border : groupBorders) {
+                border.setTitleColor(titleColor);
+            }
+        }
+
+        repaint();
+    }
+
+    private void collectSearchControls(Container container) {
+        for (Component child : container.getComponents()) {
+            // Labels too: the "Include"/"Exclude" captions belong to the fields they
+            // sit next to and look live if they stay black while everything greys out.
+            if (child instanceof JCheckBox || child instanceof JTextField || child instanceof JButton || child instanceof JLabel) {
+                searchControls.add((JComponent) child);
+            }
+            if (child instanceof Container) {
+                collectSearchControls((Container) child);
+            }
+        }
+    }
+
+    private void collectGroupBorders(Container container) {
+        for (Component child : container.getComponents()) {
+            if (!(child instanceof JComponent)) {
+                continue;
+            }
+            Border border = ((JComponent) child).getBorder();
+            if (border instanceof CompoundBorder && ((CompoundBorder) border).getOutsideBorder() instanceof TitledBorder) {
+                groupBorders.add((TitledBorder) ((CompoundBorder) border).getOutsideBorder());
+            }
+        }
     }
 
     private boolean[] getCheckboxStates() {
