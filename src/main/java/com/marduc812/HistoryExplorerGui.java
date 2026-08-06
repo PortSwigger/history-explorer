@@ -3,7 +3,9 @@ package com.marduc812;
 import burp.api.montoya.MontoyaApi;
 
 import javax.swing.*;
+import javax.swing.border.CompoundBorder;
 import javax.swing.border.EmptyBorder;
+import javax.swing.border.TitledBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.tree.DefaultMutableTreeNode;
@@ -15,6 +17,8 @@ import java.awt.*;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -23,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.IntSupplier;
 
 public class HistoryExplorerGui extends JPanel {
 
@@ -32,6 +37,97 @@ public class HistoryExplorerGui extends JPanel {
      * "Expand all" or filter first.
      */
     private static final int AUTO_EXPAND_LIMIT = 1000;
+
+    /**
+     * FlowLayout that reports the height it will actually occupy once it has wrapped.
+     * Stock FlowLayout always measures as a single row, so a BoxLayout parent gives it
+     * one row's worth of height and clips everything that wrapped below.
+     */
+    private static class WrapLayout extends FlowLayout {
+
+        /**
+         * The width the container is about to be given, which during a resize is not
+         * yet the width it has: parents ask a child for its preferred height before
+         * they assign its bounds. Measuring against the stale width picks the wrong
+         * number of rows and clips the last one until something revalidates.
+         */
+        private final IntSupplier widthHint;
+
+        WrapLayout(int hgap, int vgap, IntSupplier widthHint) {
+            super(LEFT, hgap, vgap);
+            this.widthHint = widthHint;
+        }
+
+        @Override
+        public Dimension preferredLayoutSize(Container target) {
+            return layoutSize(target, true);
+        }
+
+        @Override
+        public Dimension minimumLayoutSize(Container target) {
+            Dimension size = layoutSize(target, false);
+            size.width -= getHgap() + 1;
+            return size;
+        }
+
+        private Dimension layoutSize(Container target, boolean preferred) {
+            synchronized (target.getTreeLock()) {
+
+                int targetWidth = widthHint == null ? 0 : widthHint.getAsInt();
+                if (targetWidth <= 0) {
+                    targetWidth = target.getSize().width;
+                }
+                if (targetWidth <= 0) {
+                    // Not laid out yet: measure as one row, as FlowLayout would.
+                    targetWidth = Integer.MAX_VALUE;
+                }
+
+                Insets insets = target.getInsets();
+                int horizontalInsetsAndGap = insets.left + insets.right + getHgap() * 2;
+                int maxWidth = targetWidth - horizontalInsetsAndGap;
+
+                Dimension size = new Dimension(0, 0);
+                int rowWidth = 0;
+                int rowHeight = 0;
+
+                for (Component member : target.getComponents()) {
+
+                    if (!member.isVisible()) {
+                        continue;
+                    }
+
+                    Dimension memberSize = preferred ? member.getPreferredSize() : member.getMinimumSize();
+
+                    if (rowWidth + memberSize.width > maxWidth && rowWidth != 0) {
+                        addRow(size, rowWidth, rowHeight);
+                        rowWidth = 0;
+                        rowHeight = 0;
+                    }
+
+                    if (rowWidth != 0) {
+                        rowWidth += getHgap();
+                    }
+
+                    rowWidth += memberSize.width;
+                    rowHeight = Math.max(rowHeight, memberSize.height);
+                }
+
+                addRow(size, rowWidth, rowHeight);
+
+                size.width += horizontalInsetsAndGap;
+                size.height += insets.top + insets.bottom + getVgap() * 2;
+                return size;
+            }
+        }
+
+        private void addRow(Dimension size, int rowWidth, int rowHeight) {
+            size.width = Math.max(size.width, rowWidth);
+            if (size.height > 0) {
+                size.height += getVgap();
+            }
+            size.height += rowHeight;
+        }
+    }
 
     /**
      * Stand-in row for an empty tree. A type rather than a marker string, so a host
@@ -144,9 +240,6 @@ public class HistoryExplorerGui extends JPanel {
         requestBox = new JCheckBox("Requests");
         responseBox = new JCheckBox("Responses", true);
 
-        JPanel matchOptionsPanel = row(label("Search in:", displayFont), requestBox, responseBox,
-                null, regExCheckBox, inScopeFilterBox);
-
         // STATUS CODES AND HOST COLUMN
         twoHunCheckBox = new JCheckBox("2XX", true);
         threeHunCheckBox = new JCheckBox("3XX", true);
@@ -155,12 +248,9 @@ public class HistoryExplorerGui extends JPanel {
         showProtocolCheckBox = new JCheckBox("Protocol", true);
         showPortCheckBox = new JCheckBox("Port", true);
 
-        JPanel statusOptionsPanel = row(label("Status:", displayFont), twoHunCheckBox, threeHunCheckBox, fourHunCheckBox, fiveHunCheckBox,
-                null, label("Show in host:", displayFont), showProtocolCheckBox, showPortCheckBox);
-
         // EXTENSIONS
-        includeExtensionsinput = new JTextField(18);
-        excludeExtensionsinput = new JTextField(18);
+        includeExtensionsinput = new JTextField(14);
+        excludeExtensionsinput = new JTextField(14);
 
         String extensionHelp = "Comma separated, e.g. js, json. Use \"none\" for paths with no extension.";
         includeExtensionsinput.setToolTipText(extensionHelp);
@@ -180,25 +270,53 @@ public class HistoryExplorerGui extends JPanel {
             }
         });
 
-        JPanel extensionsPanel = row(label("Include extensions:", displayFont), includeExtensionsinput,
-                null, label("Exclude extensions:", displayFont), excludeExtensionsinput,
-                null, helpBtn);
+        // Every option lives in a titled group. Flat, they were three undifferentiated
+        // rows of ten checkboxes with no clue which one affected what.
+        // The option row spans the tab, so the width it will get is the tab's width
+        // less this panel's border. The tab is the outermost component and is resized
+        // first, which makes that hint current on the very first layout pass.
+        IntSupplier optionsWidth = () -> getWidth() - getInsets().left - getInsets().right;
+
+        JPanel optionsPanel = new JPanel(new WrapLayout(10, 4, optionsWidth)) {
+            @Override
+            public Dimension getMaximumSize() {
+                // Recomputed rather than fixed once, because the preferred height
+                // changes as WrapLayout reflows the groups.
+                return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+            }
+        };
+
+        optionsPanel.add(group("Search in", displayFont, requestBox, responseBox));
+        optionsPanel.add(group("Matching", displayFont, regExCheckBox, inScopeFilterBox));
+        optionsPanel.add(group("Status codes", displayFont, twoHunCheckBox, threeHunCheckBox, fourHunCheckBox, fiveHunCheckBox));
+        optionsPanel.add(group("Show in host", displayFont, showProtocolCheckBox, showPortCheckBox));
+        optionsPanel.add(group("Extensions", displayFont, label("Include", displayFont), includeExtensionsinput,
+                null, label("Exclude", displayFont), excludeExtensionsinput, helpBtn));
+
+        // WrapLayout's preferred height depends on the width it is given, so the
+        // enclosing BoxLayout has to be asked to measure again after a resize.
+        optionsPanel.addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentResized(ComponentEvent e) {
+                optionsPanel.revalidate();
+            }
+        });
 
         JPanel controlsPanel = new JPanel();
         controlsPanel.setLayout(new BoxLayout(controlsPanel, BoxLayout.Y_AXIS));
         controlsPanel.setBorder(new EmptyBorder(0, 0, 10, 0));
         controlsPanel.add(searchInputPanel);
-        controlsPanel.add(Box.createVerticalStrut(6));
-        controlsPanel.add(matchOptionsPanel);
-        controlsPanel.add(statusOptionsPanel);
-        controlsPanel.add(extensionsPanel);
+        controlsPanel.add(Box.createVerticalStrut(8));
+        controlsPanel.add(optionsPanel);
         controlsPanel.add(Box.createVerticalStrut(6));
         controlsPanel.add(searchProgress);
 
-        // Keep the rows from stretching vertically when the tab is tall.
-        for (Component row : new Component[]{searchInputPanel, matchOptionsPanel, statusOptionsPanel, extensionsPanel, searchProgress}) {
-            ((JComponent) row).setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
-            ((JComponent) row).setAlignmentX(LEFT_ALIGNMENT);
+        // Keep the fixed-height rows from stretching when the tab is tall.
+        for (Component fixed : new Component[]{searchInputPanel, searchProgress}) {
+            ((JComponent) fixed).setMaximumSize(new Dimension(Integer.MAX_VALUE, fixed.getPreferredSize().height));
+        }
+        for (Component child : new Component[]{searchInputPanel, optionsPanel, searchProgress}) {
+            ((JComponent) child).setAlignmentX(LEFT_ALIGNMENT);
         }
 
         // RESULTS
@@ -289,6 +407,20 @@ public class HistoryExplorerGui extends JPanel {
             startOfGroup = false;
         }
 
+        return panel;
+    }
+
+    /** A {@link #row} of controls under a titled border, so each option says what it governs. */
+    private static JPanel group(String title, Font font, Component... items) {
+
+        JPanel panel = row(items);
+        TitledBorder border = BorderFactory.createTitledBorder(title);
+
+        if (font != null) {
+            border.setTitleFont(font.deriveFont(font.getSize2D() - 1f));
+        }
+
+        panel.setBorder(new CompoundBorder(border, new EmptyBorder(0, 5, 3, 5)));
         return panel;
     }
 
