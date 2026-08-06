@@ -41,3 +41,15 @@ bin/
 ### Mac OS ###
 .DS_Store
 
+### Claude / AI tooling ###
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.mcp.json
+.superpowers/
+superpowers/
+docs/plans/
+docs/
+
+
