@@ -91,12 +91,8 @@ public class HistoryExplorerGui extends JPanel {
                     historyExplorer = new HistoryExplorer(api, HistoryExplorerGui.this, userInput, regExSearch, inScopeSearch, checkboxStates, showProt, showPort, includedExtensions, excludeExtensions, httpOptions);
                 } else {
                     // Stop the search
-                    searchBtn.setText("Search");
-                    searchInput.setEnabled(true);
-                    if (historyExplorer != null) {
-                        historyExplorer.stopSearch();
-                        stopSearch(); // update gui
-                    }
+                    // stopSearch() signals historyExplorer itself, so don't do it twice
+                    stopSearch();
                 }
             }
         });
@@ -156,16 +152,13 @@ public class HistoryExplorerGui extends JPanel {
 
         JButton helpBtn = new JButton("?");
 
-        JFrame frame = new JFrame("Help Window");
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(300, 200);
-        frame.setLayout(new FlowLayout());
-
         helpBtn.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                // Display a simple help message using JOptionPane
-                JOptionPane.showMessageDialog(frame, "Extensions should be comma separated values. If you want to include/exclude requests without extensions you can use the \"none\" keyword. ", "Help window", JOptionPane.INFORMATION_MESSAGE);
+                // Parent the dialog on this tab. A dedicated JFrame was used here, but it
+                // was never shown and carried EXIT_ON_CLOSE, which would have taken the
+                // whole of Burp down with it.
+                JOptionPane.showMessageDialog(HistoryExplorerGui.this, "Extensions should be comma separated values. If you want to include/exclude requests without extensions you can use the \"none\" keyword. ", "Help window", JOptionPane.INFORMATION_MESSAGE);
             }
         });
 
@@ -242,6 +235,9 @@ public class HistoryExplorerGui extends JPanel {
     public void enableSearchButton() {
         java.awt.EventQueue.invokeLater(() -> {
             searchInput.setEnabled(true);
+            // stopSearch() disables the button while it waits, so re-enable it here too
+            // or a search that finishes mid-stop leaves it dead until the timer fires.
+            searchBtn.setEnabled(true);
             searchBtn.setText("Search");
         });
     }

@@ -1,29 +1,50 @@
 package com.marduc812;
+
+import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.proxy.ProxyHistoryFilter;
 import burp.api.montoya.proxy.ProxyHttpRequestResponse;
+
 import java.util.regex.Pattern;
 
+/**
+ * Pre-filter handed to api.proxy().history(...) so Burp only materialises items
+ * that can contribute a result.
+ */
 public class FilterHTTPResults implements ProxyHistoryFilter {
-    private final Pattern pattern;
 
-    public FilterHTTPResults(String searchTerm) {
-        this.pattern = Pattern.compile(searchTerm);
+    private final String searchTerm;
+    private final Pattern pattern; // null when this is a literal search
+    private final boolean searchRequests;
+    private final boolean searchResponses;
+
+    public FilterHTTPResults(String searchTerm, Pattern pattern, boolean searchRequests, boolean searchResponses) {
+        this.searchTerm = searchTerm;
+        this.pattern = pattern;
+        this.searchRequests = searchRequests;
+        this.searchResponses = searchResponses;
     }
 
     @Override
     public boolean matches(ProxyHttpRequestResponse requestResponse) {
-        // You can check request or response or both. Example for checking response body:
-
-        String request = String.valueOf(requestResponse.finalRequest());
-        String response = "";
-        if (requestResponse.originalResponse() != null) {
-            response = String.valueOf(requestResponse.originalResponse());
+        // The request is usually far smaller than the response, so test it first and
+        // let the short circuit skip stringifying the response altogether.
+        if (searchRequests) {
+            HttpRequest request = requestResponse.finalRequest();
+            if (request != null && contains(request.toString())) {
+                return true;
+            }
         }
 
-        boolean resMatch = pattern.matcher(response).find();
-        boolean reqMatch = pattern.matcher(request).find();
+        if (searchResponses) {
+            HttpResponse response = requestResponse.originalResponse();
+            return response != null && contains(response.toString());
+        }
 
-        return  resMatch || reqMatch;
+        return false;
     }
 
+    private boolean contains(String text) {
+        return pattern != null ? pattern.matcher(text).find() : text.contains(searchTerm);
+    }
 }

@@ -1,17 +1,19 @@
 package com.marduc812;
 
 import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.http.HttpService;
+import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.logging.Logging;
 import burp.api.montoya.proxy.*;
 import burp.api.montoya.scope.Scope;
 
-import java.net.MalformedURLException;
-import java.net.URL;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 public class HistoryExplorer {
     static Logging logging;
@@ -26,51 +28,58 @@ public class HistoryExplorer {
         scope = api.scope();
         this.gui = gui;
 
-        String[] excludedExtensions;
-        String[] includedExtensions;
-        List<String> statusFilters = getStatusFilters(searchStatusCodes);
-
         if (searchTerm == null || searchTerm.isEmpty()) {
             logging.logToOutput("Empty search string");
             gui.enableSearchButton();
             return;
         }
 
-        if (excludedExtensionsString.isEmpty()) {
-            excludedExtensions = new String[0];
-        } else {
-            excludedExtensions = excludedExtensionsString.split(",");
-            for (int i = 0; i < excludedExtensions.length; i++) {
-                excludedExtensions[i] = excludedExtensions[i].trim();
-            }
-        }
-
-        if (includedExtensionsString.isEmpty()) {
-            includedExtensions = new String[0];
-        } else {
-            includedExtensions = includedExtensionsString.split(",");
-            for (int i = 0; i < includedExtensions.length; i++) {
-                includedExtensions[i] = includedExtensions[i].trim();
-            }
-        }
-
         // all request filters are disabled
+        List<String> statusFilters = getStatusFilters(searchStatusCodes);
         if (statusFilters.isEmpty()) {
             logging.logToOutput("At least one of the Request Response options should be enabled");
             gui.enableSearchButton();
             return;
         }
 
-        if (!httpOptions.get(0) && !httpOptions.get(1)) {
+        boolean searchRequests = httpOptions.get(0);
+        boolean searchResponses = httpOptions.get(1);
+        if (!searchRequests && !searchResponses) {
             // Both reqSearch and resSearch are false
             logging.logToOutput("At least one of the HTTP options should be enabled");
             gui.enableSearchButton();
             return;
         }
 
+        // Only treat the term as a regex when the user asked for one. Compiling a
+        // literal term both throws on ordinary input such as "?" or "cache[" and
+        // changes what matches: the regex a+b does not match the text "a+b".
+        Pattern pattern = null;
+        if (regExSearch) {
+            try {
+                pattern = Pattern.compile(searchTerm);
+            } catch (PatternSyntaxException e) {
+                logging.logToError("Invalid regular expression: " + e.getMessage());
+                gui.enableSearchButton();
+                return;
+            }
+        }
+
+        Set<String> includedExtensions = parseExtensions(includedExtensionsString);
+        Set<String> excludedExtensions = parseExtensions(excludedExtensionsString);
+        Pattern searchPattern = pattern;
+
         this.executorService = Executors.newFixedThreadPool(4);
         executorService.submit(() -> {
-            processHttpHistory(api, gui, searchTerm, regExSearch, inScopeSearch, searchStatusCodes, showProtocol, showPort, includedExtensions, excludedExtensions, httpOptions);
+            try {
+                processHttpHistory(api, gui, searchTerm, searchPattern, inScopeSearch, statusFilters, showProtocol, showPort, includedExtensions, excludedExtensions, searchRequests, searchResponses);
+            } catch (Throwable t) {
+                // submit() parks throwables in a Future nobody reads, so without this
+                // the search dies leaving no trace and the button stuck on "Stop".
+                logging.logToError("Search failed: " + t);
+            } finally {
+                gui.enableSearchButton();
+            }
         });
     }
 
@@ -78,15 +87,11 @@ public class HistoryExplorer {
         stopSearchFlag = true;
     }
 
-    private void processHttpHistory(MontoyaApi api, HistoryExplorerGui gui, String searchTerm, boolean regExSearch, boolean inScopeSearch, boolean[] searchStatusCodes, Boolean showProtocol, Boolean showPort, String[] includedExtensions, String[] excludedExtensions, List<Boolean> httpOptions) {
+    private void processHttpHistory(MontoyaApi api, HistoryExplorerGui gui, String searchTerm, Pattern pattern, boolean inScopeSearch, List<String> statusFilters, boolean showProtocol, boolean showPort, Set<String> includedExtensions, Set<String> excludedExtensions, boolean searchRequests, boolean searchResponses) {
 
-        List<String> statusFilters = getStatusFilters(searchStatusCodes);
-        FilterHTTPResults filterHTTP = new FilterHTTPResults(searchTerm);
+        FilterHTTPResults filterHTTP = new FilterHTTPResults(searchTerm, pattern, searchRequests, searchResponses);
         List<ProxyHttpRequestResponse> httpHistory = api.proxy().history(filterHTTP);
-        Map<String, Set<String>> hostToServersMap = new HashMap<>();
-        Pattern pattern = Pattern.compile(searchTerm);
-        Boolean reqFilter = httpOptions.get(0);
-        Boolean resFilter = httpOptions.get(1);
+        Map<String, Set<String>> hostToServersMap = new LinkedHashMap<>();
 
         logging.logToOutput("#############\nRecords returned: " + httpHistory.size() + "\n##########\n");
 
@@ -98,100 +103,55 @@ public class HistoryExplorer {
                 break;
             }
 
-            if (item.originalResponse() != null && item.finalRequest() != null) {
-
-                if (!statusFilters.contains(String.valueOf(item.originalResponse().statusCode()).substring(0, 1))) {
-                    continue;
-                }
-
-                if (inScopeSearch) {
-                    if (!scope.isInScope(item.url())) {
-                        continue;
-                    }
-                }
-
-                String requestExtensionStr = String.valueOf(getExtensionFromPath(item.path()));
-
-                if (excludedExtensions.length > 0 && requestExtensionStr != null && Arrays.asList(excludedExtensions).contains(requestExtensionStr)) {
-                    continue;
-                }
-
-                if (includedExtensions.length > 0 && requestExtensionStr != null && !Arrays.asList(includedExtensions).contains(requestExtensionStr)) {
-                    continue;
-                }
-
-                List<String> matchingValues = new ArrayList<>();
-
-                if (regExSearch) {
-                    if (reqFilter) {
-                        Matcher requestMatcher = pattern.matcher(item.finalRequest().toString());
-                        while (requestMatcher.find()) {
-                            matchingValues.add(requestMatcher.group());
-                        }
-                    }
-
-                    if (resFilter) {
-                        Matcher responseMatcher = pattern.matcher(item.originalResponse().toString());
-                        while (responseMatcher.find()) {
-                            matchingValues.add(responseMatcher.group());
-                        }
-                    }
-                } else {
-                    if (reqFilter) {
-                        String request = item.finalRequest().toString();
-                        if (request.contains(searchTerm)) {
-                            matchingValues.add(searchTerm);
-                        }
-                    }
-                    if (resFilter) {
-                        String response = item.originalResponse().toString();
-                        if (response.contains(searchTerm)) {
-                            matchingValues.add(searchTerm);
-                        }
-                    }
-                }
-
-                if (!matchingValues.isEmpty()) {
-                    Set<String> uniqueMatchingValues = new HashSet<>(matchingValues);
-
-                    String urlString = item.url();
-                    String protocol = "";
-                    String host = item.host();
-                    int port = -1;
-
-                    try {
-                        URL url = new URL(urlString);
-                        protocol = url.getProtocol();
-                        port = url.getPort();
-                    } catch (MalformedURLException e) {
-                        logging.logToError("Error parsing URL: " + e.getMessage());
-                    }
-
-                    StringBuilder hostBuilder = new StringBuilder();
-                    if (showProtocol) {
-                        hostBuilder.append(protocol).append("://");
-                    }
-                    hostBuilder.append(host);
-                    if (showPort) {
-                        if (port == -1) {
-                            if ("http".equalsIgnoreCase(protocol)) {
-                                port = 80;
-                            } else if ("https".equalsIgnoreCase(protocol)) {
-                                port = 443;
-                            }
-                        }
-                        hostBuilder.append(":").append(port);
-                    }
-
-
-                    String hostString = hostBuilder.toString();
-                    hostToServersMap.putIfAbsent(hostString, new HashSet<>());
-
-                    Set<String> matchesForHost = hostToServersMap.get(hostString);
-                    matchesForHost.addAll(uniqueMatchingValues);
-                }
+            HttpRequest request = item.finalRequest();
+            if (request == null) {
+                continue;
             }
-        };
+
+            HttpResponse response = item.originalResponse();
+
+            // A missing response only disqualifies an item when we need one. There is
+            // no status code to filter on and no response body to search, but the
+            // request is still searchable.
+            if (response == null) {
+                if (!searchRequests) {
+                    continue;
+                }
+            } else if (!statusFilters.contains(String.valueOf(response.statusCode()).substring(0, 1))) {
+                continue;
+            }
+
+            if (inScopeSearch && !scope.isInScope(item.url())) {
+                continue;
+            }
+
+            String requestExtensionStr = getExtensionFromPath(item.path()).toLowerCase(Locale.ROOT);
+
+            if (excludedExtensions.contains(requestExtensionStr)) {
+                continue;
+            }
+
+            if (!includedExtensions.isEmpty() && !includedExtensions.contains(requestExtensionStr)) {
+                continue;
+            }
+
+            Set<String> matchingValues = new LinkedHashSet<>();
+
+            if (searchRequests) {
+                collectMatches(request.toString(), searchTerm, pattern, matchingValues);
+            }
+
+            if (searchResponses && response != null) {
+                collectMatches(response.toString(), searchTerm, pattern, matchingValues);
+            }
+
+            if (matchingValues.isEmpty()) {
+                continue;
+            }
+
+            String hostString = buildHostLabel(request, showProtocol, showPort);
+            hostToServersMap.computeIfAbsent(hostString, key -> new LinkedHashSet<>()).addAll(matchingValues);
+        }
 
         httpHistory.clear();
         httpHistory = null;
@@ -204,14 +164,63 @@ public class HistoryExplorer {
             newData.put(host, parsedString);
         });
 
-        java.awt.EventQueue.invokeLater(() -> {
-            gui.enableSearchButton();
-            gui.updateTableData(newData);
-        });
+        java.awt.EventQueue.invokeLater(() -> gui.updateTableData(newData));
     }
 
+    private static void collectMatches(String text, String searchTerm, Pattern pattern, Set<String> into) {
+        if (pattern == null) {
+            if (text.contains(searchTerm)) {
+                into.add(searchTerm);
+            }
+            return;
+        }
 
+        Matcher matcher = pattern.matcher(text);
+        while (matcher.find()) {
+            into.add(matcher.group());
+        }
+    }
 
+    /**
+     * Builds the Host column label from the request's service rather than by parsing
+     * item.url(), which reports -1 for a default port and leaves the label as
+     * "://host:-1" when the URL fails to parse.
+     */
+    private static String buildHostLabel(HttpRequest request, boolean showProtocol, boolean showPort) {
+
+        HttpService service = request.httpService();
+        StringBuilder hostBuilder = new StringBuilder();
+
+        if (showProtocol) {
+            hostBuilder.append(service.secure() ? "https" : "http").append("://");
+        }
+
+        hostBuilder.append(service.host());
+
+        if (showPort) {
+            hostBuilder.append(':').append(service.port());
+        }
+
+        return hostBuilder.toString();
+    }
+
+    private static Set<String> parseExtensions(String extensionsString) {
+
+        Set<String> extensions = new HashSet<>();
+
+        if (extensionsString == null || extensionsString.trim().isEmpty()) {
+            return extensions;
+        }
+
+        for (String extension : extensionsString.split(",")) {
+            String trimmed = extension.trim().toLowerCase(Locale.ROOT);
+            if (!trimmed.isEmpty()) {
+                extensions.add(trimmed);
+            }
+        }
+
+        return extensions;
+    }
 
     private List<String> getStatusFilters(boolean[] statusFilter) {
 
@@ -255,5 +264,3 @@ public class HistoryExplorer {
 
 
 }
-
-
