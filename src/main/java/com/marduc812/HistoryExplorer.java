@@ -9,13 +9,19 @@ import burp.api.montoya.proxy.*;
 import burp.api.montoya.scope.Scope;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 public class HistoryExplorer {
+
+    /** Matches the pool the extension has always allocated for search work. */
+    private static final int SEARCH_THREADS = 4;
+
     static Logging logging;
     HistoryExplorerGui gui;
     static Scope scope;
@@ -71,7 +77,7 @@ public class HistoryExplorer {
         this.executorService = Executors.newSingleThreadExecutor();
         executorService.submit(() -> {
             try {
-                FilterHTTPResults filterHTTP = new FilterHTTPResults(searchTerm, searchPattern, searchRequests, searchResponses, searchStatusCodes, scope, inScopeSearch, includedExtensions, excludedExtensions, this::isStopped);
+                FilterHTTPResults filterHTTP = new FilterHTTPResults(searchRequests, searchStatusCodes, scope, inScopeSearch, includedExtensions, excludedExtensions, this::isStopped);
                 processHttpHistory(api, gui, searchTerm, searchPattern, showProtocol, showPort, searchRequests, searchResponses, filterHTTP);
             } catch (Throwable t) {
                 // submit() parks throwables in a Future nobody reads, so without this
@@ -95,74 +101,92 @@ public class HistoryExplorer {
         return stopSearchFlag;
     }
 
-    private void processHttpHistory(MontoyaApi api, HistoryExplorerGui gui, String searchTerm, Pattern pattern, boolean showProtocol, boolean showPort, boolean searchRequests, boolean searchResponses, FilterHTTPResults filterHTTP) {
+    private void processHttpHistory(MontoyaApi api, HistoryExplorerGui gui, String searchTerm, Pattern pattern, boolean showProtocol, boolean showPort, boolean searchRequests, boolean searchResponses, FilterHTTPResults filterHTTP) throws Exception {
 
-        // Every filter now lives in filterHTTP, so each item Burp hands back is
-        // already a confirmed hit. All that is left is extracting the matched text
-        // and grouping it by host.
         List<ProxyHttpRequestResponse> httpHistory = api.proxy().history(filterHTTP);
-        Map<String, Set<String>> hostToServersMap = new LinkedHashMap<>();
+        Map<String, Set<String>> hostToServersMap = new ConcurrentHashMap<>();
 
         logging.logToOutput("#############\nRecords returned: " + httpHistory.size() + "\n##########\n");
 
+        // Scanning message bodies is the expensive half of a search and each item is
+        // independent, so fan it out. A private pool rather than the common
+        // ForkJoinPool, which is shared with the rest of Burp.
+        ForkJoinPool searchPool = new ForkJoinPool(SEARCH_THREADS);
+        try {
+            searchPool.submit(() -> httpHistory.parallelStream().forEach(item -> {
 
-        for (ProxyHttpRequestResponse item : httpHistory) {
+                if (stopSearchFlag) {
+                    return;
+                }
 
-            if (stopSearchFlag) {
-                logging.logToOutput("Search stopped by user.");
-                break;
-            }
+                HttpRequest request = item.finalRequest();
+                if (request == null) {
+                    return;
+                }
 
-            HttpRequest request = item.finalRequest();
-            if (request == null) {
-                continue;
-            }
+                Set<String> matchingValues = collectMatches(item, request, searchTerm, pattern, searchRequests, searchResponses);
+                if (matchingValues.isEmpty()) {
+                    return;
+                }
 
-            Set<String> matchingValues = collectMatches(item, request, searchTerm, pattern, searchRequests, searchResponses);
-            if (matchingValues.isEmpty()) {
-                continue;
-            }
-
-            String hostString = buildHostLabel(request, showProtocol, showPort);
-            hostToServersMap.computeIfAbsent(hostString, key -> new LinkedHashSet<>()).addAll(matchingValues);
+                String hostString = buildHostLabel(request, showProtocol, showPort);
+                hostToServersMap.computeIfAbsent(hostString, key -> ConcurrentHashMap.newKeySet()).addAll(matchingValues);
+            })).get();
+        } finally {
+            searchPool.shutdown();
         }
 
-        Map<String, String> newData = new LinkedHashMap<>();
+        if (stopSearchFlag) {
+            logging.logToOutput("Search stopped by user.");
+        }
 
-        hostToServersMap.forEach((host, parsedValues) -> {
-            String parsedString = String.join(" || ", parsedValues);
-            newData.put(host, parsedString);
-        });
+        // Sorted because the parallel pass leaves no meaningful encounter order.
+        Map<String, String> newData = new LinkedHashMap<>();
+        List<String> hosts = new ArrayList<>(hostToServersMap.keySet());
+        Collections.sort(hosts);
+
+        for (String host : hosts) {
+            List<String> parsedValues = new ArrayList<>(hostToServersMap.get(host));
+            Collections.sort(parsedValues);
+            newData.put(host, String.join(" || ", parsedValues));
+        }
 
         java.awt.EventQueue.invokeLater(() -> gui.updateTableData(newData));
     }
 
     private static Set<String> collectMatches(ProxyHttpRequestResponse item, HttpRequest request, String searchTerm, Pattern pattern, boolean searchRequests, boolean searchResponses) {
 
-        // A literal search has nothing to extract: the filter already confirmed the
-        // hit and the matched text is the search term itself, so there is no reason
-        // to stringify the message a second time.
-        if (pattern == null) {
-            return Set.of(searchTerm);
-        }
-
         Set<String> matchingValues = new LinkedHashSet<>();
 
+        // The request is usually far smaller than the response, so scan it first.
         if (searchRequests) {
-            addMatches(pattern, request.toString(), matchingValues);
+            addMatches(request.toString(), searchTerm, pattern, matchingValues);
         }
 
-        if (searchResponses) {
+        // A literal search can only ever yield the search term, so once the request
+        // has produced it there is nothing the response could add and it never has to
+        // be stringified. A regex search has to scan both for their distinct matches.
+        boolean nothingLeftToFind = pattern == null && !matchingValues.isEmpty();
+
+        if (searchResponses && !nothingLeftToFind) {
             HttpResponse response = item.originalResponse();
             if (response != null) {
-                addMatches(pattern, response.toString(), matchingValues);
+                addMatches(response.toString(), searchTerm, pattern, matchingValues);
             }
         }
 
         return matchingValues;
     }
 
-    private static void addMatches(Pattern pattern, String text, Set<String> into) {
+    private static void addMatches(String text, String searchTerm, Pattern pattern, Set<String> into) {
+
+        // A literal search has nothing to extract: the matched text is the term.
+        if (pattern == null) {
+            if (text.contains(searchTerm)) {
+                into.add(searchTerm);
+            }
+            return;
+        }
 
         Matcher matcher = pattern.matcher(text);
         while (matcher.find()) {
