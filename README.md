@@ -5,11 +5,12 @@ During a large assessment I conducted, I wanted a clear view of which servers we
 
 ## Features
 
-- Search using a literal string or a regex by selecting the `RegEx Search` checkbox.
+- Search using a literal string or a regex by selecting the `Regular expression` checkbox.
 - Choose the type of `status code` to include in the history search.
 - Include or exclude file extensions in your search. Use the keyword `none` for requests without an extension.
-- Results can be copied directly from the table using the standard `ctrl + c` combination.
-- If multiple results occur on the same host, the values are separated by `||`.
+- Results are grouped per host in an expandable tree, one match per row.
+- Narrow the results with the `Filter results` box without running the search again.
+- Results can be copied with the standard `ctrl + c` combination or the right-click menu. Copied rows are host and value separated by a tab, so they paste straight into a spreadsheet.
 - Filter only for in-scope items
 
 ## Screenshot
@@ -22,6 +23,10 @@ Literal string search for nginx, and exclusion of requests with no extension, js
 
 ## Changelog
 
+- Unreleased
+  - Results are shown as a per-host tree with one match per row, replacing the `||` joined table cell
+  - Result filter box, expand/collapse all, and a right-click copy menu
+  - Reworked layout that follows Burp's own theme and fonts
 
 - V1.3 (24/06/2024)
   - Option to stop the search

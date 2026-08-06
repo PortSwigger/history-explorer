@@ -141,17 +141,17 @@ public class HistoryExplorer {
         }
 
         // Sorted because the parallel pass leaves no meaningful encounter order.
-        Map<String, String> newData = new LinkedHashMap<>();
+        Map<String, List<String>> newData = new LinkedHashMap<>();
         List<String> hosts = new ArrayList<>(hostToServersMap.keySet());
         Collections.sort(hosts);
 
         for (String host : hosts) {
             List<String> parsedValues = new ArrayList<>(hostToServersMap.get(host));
             Collections.sort(parsedValues);
-            newData.put(host, String.join(" || ", parsedValues));
+            newData.put(host, parsedValues);
         }
 
-        java.awt.EventQueue.invokeLater(() -> gui.updateTableData(newData));
+        java.awt.EventQueue.invokeLater(() -> gui.updateResults(newData));
     }
 
     private static Set<String> collectMatches(ProxyHttpRequestResponse item, HttpRequest request, String searchTerm, Pattern pattern, boolean searchRequests, boolean searchResponses) {

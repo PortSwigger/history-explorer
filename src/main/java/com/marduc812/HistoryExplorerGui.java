@@ -3,20 +3,53 @@ package com.marduc812;
 import burp.api.montoya.MontoyaApi;
 
 import javax.swing.*;
-import javax.swing.border.Border;
-import javax.swing.border.CompoundBorder;
 import javax.swing.border.EmptyBorder;
-import javax.swing.border.TitledBorder;
-import javax.swing.table.DefaultTableModel;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+import javax.swing.tree.DefaultMutableTreeNode;
+import javax.swing.tree.DefaultTreeCellRenderer;
+import javax.swing.tree.DefaultTreeModel;
+import javax.swing.tree.TreePath;
+import javax.swing.tree.TreeSelectionModel;
 import java.awt.*;
+import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 public class HistoryExplorerGui extends JPanel {
+
+    /**
+     * Above this many result rows the tree stays collapsed after a search. Expanding
+     * tens of thousands of nodes is slow and unreadable; the user can still hit
+     * "Expand all" or filter first.
+     */
+    private static final int AUTO_EXPAND_LIMIT = 1000;
+
+    /**
+     * Stand-in row for an empty tree. A type rather than a marker string, so a host
+     * whose name happens to match the message is still rendered as a host.
+     */
+    private static class Placeholder {
+
+        private final String text;
+
+        Placeholder(String text) {
+            this.text = text;
+        }
+
+        @Override
+        public String toString() {
+            return text;
+        }
+    }
 
     private final JCheckBox twoHunCheckBox;
     private final JCheckBox threeHunCheckBox;
@@ -30,40 +63,39 @@ public class HistoryExplorerGui extends JPanel {
     private final JTextField excludeExtensionsinput;
     private final JCheckBox showProtocolCheckBox;
     private final JCheckBox showPortCheckBox;
-    private final DefaultTableModel tableModel;
     private final JButton searchBtn;
     private final JTextField searchInput;
 
-    private  HistoryExplorer historyExplorer;
+    private final JTree resultTree;
+    private final DefaultMutableTreeNode resultRoot;
+    private final DefaultTreeModel resultModel;
+    private final JTextField resultFilterInput;
+    private final JLabel resultSummaryLabel;
+    private final JProgressBar searchProgress;
+
+    /** The last full result set, kept so the result filter can re-derive the tree. */
+    private Map<String, List<String>> results = new LinkedHashMap<>();
+
+    private HistoryExplorer historyExplorer;
 
     public HistoryExplorerGui(MontoyaApi api) {
 
-        setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
+        Font displayFont = api.userInterface().currentDisplayFont();
+        Font valueFont = api.userInterface().currentEditorFont();
 
-        // BORDER VIEW
-        Border roundedLineBorder = new javax.swing.border.LineBorder(Color.BLACK, 1, true);
-        TitledBorder titledBorder = new TitledBorder(roundedLineBorder, "Search HTTP History");
-        Border emptyBorder = new EmptyBorder(10, 10, 10, 10);
-        Border compoundBorder = new CompoundBorder(titledBorder, emptyBorder);
-        titledBorder.setTitleFont(titledBorder.getTitleFont().deriveFont(Font.BOLD));
-
-        JPanel mainPanel = new JPanel();
-        mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
-        mainPanel.setBorder(compoundBorder);
-
+        setLayout(new BorderLayout());
+        setBorder(new EmptyBorder(10, 10, 10, 10));
 
         // MAIN SEARCH
-        JPanel searchInputPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 5));
-        searchInput = new JTextField("");
+        searchInput = new JTextField();
+        searchInput.putClientProperty("JTextField.placeholderText", "Search the proxy history...");
         searchBtn = new JButton("Search");
+        searchBtn.setPreferredSize(new Dimension(110, searchBtn.getPreferredSize().height));
 
-        Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();
-        int width = (int) (screenSize.width * 0.3); // 30% of screen width
-        searchInput.setPreferredSize(new Dimension(width - 10, searchInput.getPreferredSize().height));
-        searchInput.setBorder(BorderFactory.createCompoundBorder(
-                searchInput.getBorder(),
-                BorderFactory.createEmptyBorder(0, 5, 0, 5)
-        ));
+        searchProgress = new JProgressBar();
+        searchProgress.setIndeterminate(true);
+        searchProgress.setVisible(false);
+        searchProgress.setPreferredSize(new Dimension(0, 3));
 
         searchBtn.addActionListener(new ActionListener() {
             @Override
@@ -72,6 +104,8 @@ public class HistoryExplorerGui extends JPanel {
                     // Start the search
                     searchBtn.setText("Stop");
                     searchInput.setEnabled(false);
+                    searchProgress.setVisible(true);
+                    resultSummaryLabel.setText("Searching...");
 
                     // Collect search parameters and start a new HistoryExplorer
                     String userInput = searchInput.getText();
@@ -97,60 +131,44 @@ public class HistoryExplorerGui extends JPanel {
             }
         });
 
+        // Enter in the search field is the same as pressing the button.
+        searchInput.addActionListener(e -> searchBtn.doClick());
 
-        searchInputPanel.add(searchInput);
-        searchInputPanel.add(searchBtn);
+        JPanel searchInputPanel = new JPanel(new BorderLayout(8, 0));
+        searchInputPanel.add(searchInput, BorderLayout.CENTER);
+        searchInputPanel.add(searchBtn, BorderLayout.EAST);
 
-
-        // REGEX LAYOUT & SCOPE FILTER
-        JPanel regexOptionsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 5));
-        regExCheckBox = new JCheckBox("RegEx Search");
-        inScopeFilterBox = new JCheckBox("Only In-Scope");
-
-        regexOptionsPanel.add(regExCheckBox);
-        regexOptionsPanel.add(inScopeFilterBox);
-
-
-        // HTTP options FILTER
-        JPanel httpOptionsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 5));
-        JLabel filterHTTPLabel = new JLabel("Filter HTTP: ");
+        // MATCHING OPTIONS
+        regExCheckBox = new JCheckBox("Regular expression");
+        inScopeFilterBox = new JCheckBox("In-scope only");
         requestBox = new JCheckBox("Requests");
         responseBox = new JCheckBox("Responses", true);
 
-        httpOptionsPanel.add(filterHTTPLabel);
-        httpOptionsPanel.add(requestBox);
-        httpOptionsPanel.add(responseBox);
+        JPanel matchOptionsPanel = row(label("Search in:", displayFont), requestBox, responseBox,
+                null, regExCheckBox, inScopeFilterBox);
 
-        // STATUS RESPONSE CODES LAYOUT
-        JPanel searchOptionsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 5));
-
-        JLabel optionsLabel = new JLabel("Status filter:");
+        // STATUS CODES AND HOST COLUMN
         twoHunCheckBox = new JCheckBox("2XX", true);
         threeHunCheckBox = new JCheckBox("3XX", true);
         fourHunCheckBox = new JCheckBox("4XX", true);
         fiveHunCheckBox = new JCheckBox("5XX", true);
+        showProtocolCheckBox = new JCheckBox("Protocol", true);
+        showPortCheckBox = new JCheckBox("Port", true);
 
+        JPanel statusOptionsPanel = row(label("Status:", displayFont), twoHunCheckBox, threeHunCheckBox, fourHunCheckBox, fiveHunCheckBox,
+                null, label("Show in host:", displayFont), showProtocolCheckBox, showPortCheckBox);
 
-        searchOptionsPanel.add(optionsLabel);
-        searchOptionsPanel.add(twoHunCheckBox);
-        searchOptionsPanel.add(threeHunCheckBox);
-        searchOptionsPanel.add(fourHunCheckBox);
-        searchOptionsPanel.add(fiveHunCheckBox);
+        // EXTENSIONS
+        includeExtensionsinput = new JTextField(18);
+        excludeExtensionsinput = new JTextField(18);
 
-        // EXTENSION CODE LAYOUT
-        JPanel searchExtensionPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 5));
-
-        JLabel includeExtensionsLabel = new JLabel("Include extensions: ");
-        JLabel excludeExtensionsLabel = new JLabel("Exclude extensions: ");
-
-
-        includeExtensionsinput = new JTextField("");
-        includeExtensionsinput.setPreferredSize(new Dimension(300,includeExtensionsinput.getPreferredSize().height));
-        excludeExtensionsinput = new JTextField("");
-        excludeExtensionsinput.setPreferredSize(new Dimension(300,excludeExtensionsinput.getPreferredSize().height));
-
+        String extensionHelp = "Comma separated, e.g. js, json. Use \"none\" for paths with no extension.";
+        includeExtensionsinput.setToolTipText(extensionHelp);
+        excludeExtensionsinput.setToolTipText(extensionHelp);
 
         JButton helpBtn = new JButton("?");
+        helpBtn.setToolTipText("How extension filtering works");
+        helpBtn.setMargin(new Insets(0, 6, 0, 6));
 
         helpBtn.addActionListener(new ActionListener() {
             @Override
@@ -162,73 +180,124 @@ public class HistoryExplorerGui extends JPanel {
             }
         });
 
-        searchExtensionPanel.add(includeExtensionsLabel);
-        searchExtensionPanel.add(includeExtensionsinput);
-        searchExtensionPanel.add(excludeExtensionsLabel);
-        searchExtensionPanel.add(excludeExtensionsinput);
-        searchExtensionPanel.add(helpBtn);
+        JPanel extensionsPanel = row(label("Include extensions:", displayFont), includeExtensionsinput,
+                null, label("Exclude extensions:", displayFont), excludeExtensionsinput,
+                null, helpBtn);
 
+        JPanel controlsPanel = new JPanel();
+        controlsPanel.setLayout(new BoxLayout(controlsPanel, BoxLayout.Y_AXIS));
+        controlsPanel.setBorder(new EmptyBorder(0, 0, 10, 0));
+        controlsPanel.add(searchInputPanel);
+        controlsPanel.add(Box.createVerticalStrut(6));
+        controlsPanel.add(matchOptionsPanel);
+        controlsPanel.add(statusOptionsPanel);
+        controlsPanel.add(extensionsPanel);
+        controlsPanel.add(Box.createVerticalStrut(6));
+        controlsPanel.add(searchProgress);
 
-        // Host column view layout
-        JPanel hostColPrefsPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 5));
-
-        JLabel showProtocolLabel = new JLabel("Host filtering: ");
-
-        showProtocolCheckBox = new JCheckBox("Protocol", true);
-        showPortCheckBox = new JCheckBox("Port", true);
-
-        hostColPrefsPanel.add(showProtocolLabel);
-        hostColPrefsPanel.add(showProtocolCheckBox);
-        hostColPrefsPanel.add(showPortCheckBox);
-
-        // OUTPUT
-        JPanel outputPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 5));
-
-        String[] columnNames = {"Host", "Output"};
-
-        Map<String, String> dataMap = new LinkedHashMap<>();
-
-        String[][] data = new String[dataMap.size()][2];
-        int index = 0;
-        for (Map.Entry<String, String> entry : dataMap.entrySet()) {
-            data[index][0] = entry.getKey();
-            data[index][1] = entry.getValue();
-            index++;
+        // Keep the rows from stretching vertically when the tab is tall.
+        for (Component row : new Component[]{searchInputPanel, matchOptionsPanel, statusOptionsPanel, extensionsPanel, searchProgress}) {
+            ((JComponent) row).setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
+            ((JComponent) row).setAlignmentX(LEFT_ALIGNMENT);
         }
 
+        // RESULTS
+        resultRoot = new DefaultMutableTreeNode("Results");
+        resultModel = new DefaultTreeModel(resultRoot);
+        resultTree = new JTree(resultModel);
+        resultTree.setRootVisible(false);
+        resultTree.setShowsRootHandles(true);
+        resultTree.setRowHeight(0); // let the renderer decide, so the value font fits
+        resultTree.getSelectionModel().setSelectionMode(TreeSelectionModel.DISCONTIGUOUS_TREE_SELECTION);
+        resultTree.setCellRenderer(new ResultRenderer(displayFont, valueFont));
+        resultTree.setToolTipText("");
 
-        tableModel = new DefaultTableModel(data, columnNames);
-        JTable table = new JTable(tableModel);
+        installCopyActions();
 
-        int tableWidth = (int) (screenSize.width * 0.8);
-        int tableHeight = (int) (screenSize.height * 0.5);
+        resultFilterInput = new JTextField(20);
+        resultFilterInput.setToolTipText("Narrow the results below. Matches hosts and values.");
+        resultFilterInput.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                rebuildTree();
+            }
 
-        // Add JTable to JScrollPane
-        JScrollPane scrollPane = new JScrollPane(table);
-        scrollPane.setPreferredSize(new Dimension(tableWidth, tableHeight));
-        outputPanel.add(scrollPane);
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                rebuildTree();
+            }
 
-        // RESIZE THE VIEWS
-        searchInputPanel.setMaximumSize(searchInputPanel.getPreferredSize());
-        regexOptionsPanel.setMaximumSize(regexOptionsPanel.getPreferredSize());
-        searchOptionsPanel.setMaximumSize(searchOptionsPanel.getPreferredSize());
-        httpOptionsPanel.setMaximumSize(searchOptionsPanel.getPreferredSize());
-        searchExtensionPanel.setMaximumSize(searchExtensionPanel.getPreferredSize());
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                rebuildTree();
+            }
+        });
 
-        // ADD EVERY VIEW
+        resultSummaryLabel = label("No results yet", displayFont);
 
-        // Create the box layout
-        mainPanel.add(searchInputPanel);
-        mainPanel.add(regexOptionsPanel);
-        mainPanel.add(httpOptionsPanel);
-        mainPanel.add(searchOptionsPanel);
-        mainPanel.add(hostColPrefsPanel);
-        mainPanel.add(searchExtensionPanel);
+        JButton expandBtn = new JButton("Expand all");
+        JButton collapseBtn = new JButton("Collapse all");
+        expandBtn.addActionListener(e -> setAllExpanded(true));
+        collapseBtn.addActionListener(e -> setAllExpanded(false));
 
+        JPanel resultToolbar = new JPanel(new BorderLayout(8, 0));
+        JPanel resultToolbarLeft = row(label("Filter results:", displayFont), resultFilterInput,
+                null, resultSummaryLabel);
 
-        // Add every view
-        add(mainPanel);
-        add(outputPanel);
+        JPanel resultToolbarRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        resultToolbarRight.add(expandBtn);
+        resultToolbarRight.add(collapseBtn);
+
+        resultToolbar.add(resultToolbarLeft, BorderLayout.WEST);
+        resultToolbar.add(resultToolbarRight, BorderLayout.EAST);
+        resultToolbar.setBorder(new EmptyBorder(8, 0, 6, 0));
+
+        JPanel resultHeader = new JPanel(new BorderLayout());
+        resultHeader.add(new JSeparator(), BorderLayout.NORTH);
+        resultHeader.add(resultToolbar, BorderLayout.CENTER);
+
+        JPanel resultPanel = new JPanel(new BorderLayout());
+        resultPanel.add(resultHeader, BorderLayout.NORTH);
+        resultPanel.add(new JScrollPane(resultTree), BorderLayout.CENTER);
+
+        add(controlsPanel, BorderLayout.NORTH);
+        add(resultPanel, BorderLayout.CENTER);
+
+        api.userInterface().applyThemeToComponent(this);
+    }
+
+    /**
+     * A left-aligned row of controls, 6px apart, with a null marking a wider break
+     * between groups. The layout gap is 0 so the first item lines up with the search
+     * field and the results below rather than sitting one gap to the right.
+     */
+    private static JPanel row(Component... items) {
+
+        JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 3));
+        boolean startOfGroup = true;
+
+        for (Component item : items) {
+            if (item == null) {
+                panel.add(Box.createHorizontalStrut(20));
+                startOfGroup = true;
+                continue;
+            }
+            if (!startOfGroup) {
+                panel.add(Box.createHorizontalStrut(6));
+            }
+            panel.add(item);
+            startOfGroup = false;
+        }
+
+        return panel;
+    }
+
+    private static JLabel label(String text, Font font) {
+        JLabel label = new JLabel(text);
+        if (font != null) {
+            label.setFont(font);
+        }
+        return label;
     }
 
     // Make the button available when not searching
@@ -239,6 +308,7 @@ public class HistoryExplorerGui extends JPanel {
             // or a search that finishes mid-stop leaves it dead until the timer fires.
             searchBtn.setEnabled(true);
             searchBtn.setText("Search");
+            searchProgress.setVisible(false);
         });
     }
 
@@ -259,6 +329,7 @@ public class HistoryExplorerGui extends JPanel {
                         searchBtn.setEnabled(true);
                         searchBtn.setText("Search");
                         searchInput.setEnabled(true);
+                        searchProgress.setVisible(false);
                     });
                 }
             });
@@ -266,9 +337,6 @@ public class HistoryExplorerGui extends JPanel {
             timer.start();
         });
     }
-
-
-
 
     private boolean[] getCheckboxStates() {
         return new boolean[]{
@@ -279,13 +347,220 @@ public class HistoryExplorerGui extends JPanel {
         };
     }
 
-    public void updateTableData(Map<String, String> newData) {
-        // Clear the existing data
-        tableModel.setRowCount(0);
+    /**
+     * Hands a finished search to the tree. Keys are hosts, values are that host's
+     * distinct matches, both already sorted by the search engine.
+     */
+    public void updateResults(Map<String, List<String>> newData) {
+        results = newData;
+        rebuildTree();
+    }
 
-        // Add the new data
-        for (Map.Entry<String, String> entry : newData.entrySet()) {
-            tableModel.addRow(new Object[]{entry.getKey(), entry.getValue()});
+    /** Rebuilds the tree from {@link #results}, applying the result filter. */
+    private void rebuildTree() {
+
+        String filter = resultFilterInput.getText().trim().toLowerCase(Locale.ROOT);
+        resultRoot.removeAllChildren();
+
+        int hostCount = 0;
+        int valueCount = 0;
+
+        for (Map.Entry<String, List<String>> entry : results.entrySet()) {
+
+            String host = entry.getKey();
+            boolean hostMatches = filter.isEmpty() || host.toLowerCase(Locale.ROOT).contains(filter);
+
+            // A host whose own name matches keeps all its values; otherwise it keeps
+            // only the values that match, and drops out entirely if none do.
+            List<String> shown = new ArrayList<>();
+            for (String value : entry.getValue()) {
+                if (hostMatches || value.toLowerCase(Locale.ROOT).contains(filter)) {
+                    shown.add(value);
+                }
+            }
+
+            if (shown.isEmpty()) {
+                continue;
+            }
+
+            DefaultMutableTreeNode hostNode = new DefaultMutableTreeNode(host);
+            for (String value : shown) {
+                hostNode.add(new DefaultMutableTreeNode(value));
+            }
+            resultRoot.add(hostNode);
+
+            hostCount++;
+            valueCount += shown.size();
+        }
+
+        if (hostCount == 0) {
+            String message = results.isEmpty()
+                    ? "Nothing to show yet. Enter a search term above and press Search."
+                    : "No host or value matches this filter.";
+            resultRoot.add(new DefaultMutableTreeNode(new Placeholder(message)));
+        }
+
+        resultModel.reload();
+
+        if (results.isEmpty()) {
+            resultSummaryLabel.setText("No results");
+        } else {
+            resultSummaryLabel.setText(hostCount + (hostCount == 1 ? " host, " : " hosts, ") + valueCount + (valueCount == 1 ? " value" : " values"));
+        }
+
+        if (valueCount > 0 && valueCount <= AUTO_EXPAND_LIMIT) {
+            setAllExpanded(true);
+        }
+    }
+
+    private void setAllExpanded(boolean expanded) {
+        for (int i = 0; i < resultRoot.getChildCount(); i++) {
+            TreePath path = new TreePath(new Object[]{resultRoot, resultRoot.getChildAt(i)});
+            if (expanded) {
+                resultTree.expandPath(path);
+            } else {
+                resultTree.collapsePath(path);
+            }
+        }
+    }
+
+    /** Ctrl/Cmd+C and a right-click menu, since a tree has no copy behaviour of its own. */
+    private void installCopyActions() {
+
+        Action copySelection = new AbstractAction("Copy") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                copyToClipboard(selectionAsText());
+            }
+        };
+
+        Action copyAll = new AbstractAction("Copy all results") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                copyToClipboard(allAsText());
+            }
+        };
+
+        int menuMask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx();
+        resultTree.getInputMap(WHEN_FOCUSED).put(KeyStroke.getKeyStroke(KeyEvent.VK_C, menuMask), "copySelection");
+        resultTree.getActionMap().put("copySelection", copySelection);
+
+        JPopupMenu menu = new JPopupMenu();
+        menu.add(copySelection);
+        menu.add(copyAll);
+
+        resultTree.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                showMenu(e);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                showMenu(e);
+            }
+
+            private void showMenu(MouseEvent e) {
+                if (!e.isPopupTrigger()) {
+                    return;
+                }
+                // Right-clicking a row the user has not selected should act on that row.
+                TreePath path = resultTree.getPathForLocation(e.getX(), e.getY());
+                if (path != null && !resultTree.isPathSelected(path)) {
+                    resultTree.setSelectionPath(path);
+                }
+                menu.show(resultTree, e.getX(), e.getY());
+            }
+        });
+    }
+
+    private String selectionAsText() {
+
+        TreePath[] paths = resultTree.getSelectionPaths();
+        if (paths == null) {
+            return "";
+        }
+
+        StringBuilder text = new StringBuilder();
+        for (TreePath path : paths) {
+            DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
+            if (node.getUserObject() instanceof Placeholder) {
+                continue;
+            }
+            if (node.isLeaf() && node.getParent() != resultRoot) {
+                // A value: prefix it with its host so a copied selection stays meaningful.
+                text.append(node.getParent()).append('\t').append(node).append('\n');
+            } else {
+                text.append(node).append('\n');
+            }
+        }
+        return text.toString();
+    }
+
+    private String allAsText() {
+
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < resultRoot.getChildCount(); i++) {
+            DefaultMutableTreeNode hostNode = (DefaultMutableTreeNode) resultRoot.getChildAt(i);
+            for (int j = 0; j < hostNode.getChildCount(); j++) {
+                text.append(hostNode).append('\t').append(hostNode.getChildAt(j)).append('\n');
+            }
+        }
+        return text.toString();
+    }
+
+    private static void copyToClipboard(String text) {
+        if (!text.isEmpty()) {
+            Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
+        }
+    }
+
+    /**
+     * Hosts in bold with their match count, values in the editor font. The default
+     * renderer's folder and leaf icons are dropped; they read as a file browser,
+     * which this is not.
+     */
+    private static class ResultRenderer extends DefaultTreeCellRenderer {
+
+        private final Font hostFont;
+        private final Font valueFont;
+
+        ResultRenderer(Font displayFont, Font valueFont) {
+            this.hostFont = displayFont == null ? null : displayFont.deriveFont(Font.BOLD);
+            this.valueFont = valueFont;
+            setLeafIcon(null);
+            setOpenIcon(null);
+            setClosedIcon(null);
+        }
+
+        @Override
+        public Component getTreeCellRendererComponent(JTree tree, Object value, boolean selected, boolean expanded, boolean leaf, int row, boolean hasFocus) {
+
+            super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, hasFocus);
+
+            DefaultMutableTreeNode node = (DefaultMutableTreeNode) value;
+
+            if (node.getUserObject() instanceof Placeholder) {
+                if (hostFont != null) {
+                    setFont(hostFont.deriveFont(Font.ITALIC));
+                }
+                setToolTipText(null);
+                return this;
+            }
+
+            if (node.getLevel() == 1) {
+                setText(node.getUserObject() + "  (" + node.getChildCount() + ")");
+                if (hostFont != null) {
+                    setFont(hostFont);
+                }
+            } else if (valueFont != null) {
+                setFont(valueFont);
+            }
+
+            // The full value, for matches too wide for the panel.
+            setToolTipText(String.valueOf(node.getUserObject()));
+
+            return this;
         }
     }
 }
