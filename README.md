@@ -23,6 +23,12 @@ Literal string search for nginx, and exclusion of requests with no extension, js
 
 ## Changelog
 
+- v2.0.1 (11/08/2026)
+  - Fixed some regular expressions freezing the whole machine, not only Burp. A pattern such as `"\S+something/.*?"` could take minutes on a *single* response, and the extension used every CPU core while it did, so the desktop stopped responding. Burp's own memory usage looked normal throughout, which made it look like a hang rather than a slow search. It was worst on minified JavaScript and JSON, where a response is one very long line
+  - Searches now skip messages that cannot possibly match. Before running your regex, the extension looks for a plain piece of text that every match has to contain and checks for that first, which is far cheaper. On test data this took a search that would have run for about an hour down to well under a second, with identical results
+  - `Stop` now takes effect immediately. It could previously appear stuck on `Stopping...` while a slow match finished
+  - The extension now leaves a CPU core free instead of always using four, so Burp and the rest of the machine stay usable during a search. This matters most on a VM or VDI with few cores
+
 - v2.0 (06/08/2026)
   - Results are shown as a per-host tree with one match per row, replacing the `||` joined table cell
   - Result filter box, expand/collapse all, and a right-click copy menu
