@@ -20,14 +20,17 @@ import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
+import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.IntSupplier;
 
 public class HistoryExplorerGui extends JPanel {
@@ -38,6 +41,16 @@ public class HistoryExplorerGui extends JPanel {
      * "Expand all" or filter first.
      */
     private static final int AUTO_EXPAND_LIMIT = 1000;
+
+    /** Depth of a host row. The root is hidden, so 1 is a host and 2 is one of its matches. */
+    private static final int HOST_LEVEL = 1;
+
+    /** Longest host name spelled out in a menu label before it is cut short. */
+    private static final int MENU_HOST_CHARS = 48;
+
+    /** Fallback labels, used when the selection does not name a single host. */
+    private static final String COPY_MATCHES = "Copy match only";
+    private static final String COPY_HOSTS = "Copy all matches for host";
 
     /**
      * FlowLayout that reports the height it will actually occupy once it has wrapped.
@@ -625,13 +638,34 @@ public class HistoryExplorerGui extends JPanel {
         }
     }
 
-    /** Ctrl/Cmd+C and a right-click menu, since a tree has no copy behaviour of its own. */
+    /**
+     * Ctrl/Cmd+C and a right-click menu, since a tree has no copy behaviour of its own.
+     *
+     * <p>Four ways out, because "the host and the value, tab separated" is only one of
+     * the things a result is wanted for. The first two act on what is selected, the
+     * last two ignore the selection and take whole hosts, so the menu is split by that
+     * distinction rather than by output format.
+     */
     private void installCopyActions() {
 
         Action copySelection = new AbstractAction("Copy") {
             @Override
             public void actionPerformed(ActionEvent e) {
                 copyToClipboard(selectionAsText());
+            }
+        };
+
+        Action copyMatches = new AbstractAction(COPY_MATCHES) {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                copyToClipboard(selectedMatchesAsText());
+            }
+        };
+
+        Action copyHosts = new AbstractAction(COPY_HOSTS) {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                copyToClipboard(hostsAsText(selectedHostNodes()));
             }
         };
 
@@ -645,9 +679,16 @@ public class HistoryExplorerGui extends JPanel {
         int menuMask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx();
         resultTree.getInputMap(WHEN_FOCUSED).put(KeyStroke.getKeyStroke(KeyEvent.VK_C, menuMask), "copySelection");
         resultTree.getActionMap().put("copySelection", copySelection);
+        // The match on its own is the other copy people reach for repeatedly — pasting
+        // values into a list — so it gets the shift variant rather than only a menu row.
+        resultTree.getInputMap(WHEN_FOCUSED).put(KeyStroke.getKeyStroke(KeyEvent.VK_C, menuMask | InputEvent.SHIFT_DOWN_MASK), "copyMatches");
+        resultTree.getActionMap().put("copyMatches", copyMatches);
 
         JPopupMenu menu = new JPopupMenu();
         menu.add(copySelection);
+        menu.add(copyMatches);
+        menu.addSeparator();
+        menu.add(copyHosts);
         menu.add(copyAll);
 
         resultTree.addMouseListener(new MouseAdapter() {
@@ -670,11 +711,26 @@ public class HistoryExplorerGui extends JPanel {
                 if (path != null && !resultTree.isPathSelected(path)) {
                     resultTree.setSelectionPath(path);
                 }
+
+                // Named after what it will actually copy: "Copy all matches for host" is
+                // guesswork on a tree where the host row may be scrolled out of sight.
+                List<DefaultMutableTreeNode> hosts = selectedHostNodes();
+                copyHosts.putValue(Action.NAME, hosts.size() == 1
+                        ? "Copy all matches for " + abbreviate(String.valueOf(hosts.get(0).getUserObject()))
+                        : COPY_HOSTS);
+
+                boolean hasSelection = !hosts.isEmpty();
+                copySelection.setEnabled(hasSelection);
+                copyMatches.setEnabled(hasSelection);
+                copyHosts.setEnabled(hasSelection);
+                copyAll.setEnabled(hasRows());
+
                 menu.show(resultTree, e.getX(), e.getY());
             }
         });
     }
 
+    /** The host and the value, tab separated. A selected host row copies its name. */
     private String selectionAsText() {
 
         TreePath[] paths = resultTree.getSelectionPaths();
@@ -698,16 +754,103 @@ public class HistoryExplorerGui extends JPanel {
         return text.toString();
     }
 
+    /**
+     * The selected matches alone, one per line, with no host in front of them — for
+     * pasting a set of values somewhere that only wants the values. A selected host row
+     * stands for all of its matches, since its own name is not a match.
+     */
+    private String selectedMatchesAsText() {
+
+        TreePath[] paths = resultTree.getSelectionPaths();
+        if (paths == null) {
+            return "";
+        }
+
+        StringBuilder text = new StringBuilder();
+        for (TreePath path : paths) {
+            DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
+            if (node.getUserObject() instanceof Placeholder) {
+                continue;
+            }
+            if (node.getLevel() == HOST_LEVEL) {
+                for (int i = 0; i < node.getChildCount(); i++) {
+                    text.append(node.getChildAt(i)).append('\n');
+                }
+            } else {
+                text.append(node).append('\n');
+            }
+        }
+        return text.toString();
+    }
+
+    /**
+     * The host rows the selection touches, in tree order and without repeats: a selected
+     * value stands for its own host, so the per-host copy works from a value row without
+     * having to find and click the host it belongs to.
+     */
+    private List<DefaultMutableTreeNode> selectedHostNodes() {
+
+        TreePath[] paths = resultTree.getSelectionPaths();
+        if (paths == null) {
+            return new ArrayList<>();
+        }
+
+        // Identity-keyed, as DefaultMutableTreeNode does not override equals: two hosts
+        // are the same host here only when they are the same node.
+        Set<DefaultMutableTreeNode> hosts = new LinkedHashSet<>();
+        for (TreePath path : paths) {
+            DefaultMutableTreeNode node = (DefaultMutableTreeNode) path.getLastPathComponent();
+            if (node.getUserObject() instanceof Placeholder) {
+                continue;
+            }
+            DefaultMutableTreeNode host = node.getLevel() == HOST_LEVEL
+                    ? node
+                    : (DefaultMutableTreeNode) node.getParent();
+            if (host != null && host != resultRoot) {
+                hosts.add(host);
+            }
+        }
+        return new ArrayList<>(hosts);
+    }
+
+    /**
+     * Every match of the given hosts, in the same host-and-value shape as "Copy all
+     * results", so one host's results paste into the same spreadsheet as the whole set.
+     */
+    private static String hostsAsText(List<DefaultMutableTreeNode> hosts) {
+
+        StringBuilder text = new StringBuilder();
+        for (DefaultMutableTreeNode host : hosts) {
+            appendHost(text, host);
+        }
+        return text.toString();
+    }
+
     private String allAsText() {
 
         StringBuilder text = new StringBuilder();
         for (int i = 0; i < resultRoot.getChildCount(); i++) {
-            DefaultMutableTreeNode hostNode = (DefaultMutableTreeNode) resultRoot.getChildAt(i);
-            for (int j = 0; j < hostNode.getChildCount(); j++) {
-                text.append(hostNode).append('\t').append(hostNode.getChildAt(j)).append('\n');
-            }
+            appendHost(text, (DefaultMutableTreeNode) resultRoot.getChildAt(i));
         }
         return text.toString();
+    }
+
+    /** Safe on the placeholder row, which has no children and so contributes nothing. */
+    private static void appendHost(StringBuilder text, DefaultMutableTreeNode host) {
+        for (int i = 0; i < host.getChildCount(); i++) {
+            text.append(host).append('\t').append(host.getChildAt(i)).append('\n');
+        }
+    }
+
+    /** True when the tree holds real results rather than nothing or the placeholder. */
+    private boolean hasRows() {
+        return resultRoot.getChildCount() > 0
+                && !(((DefaultMutableTreeNode) resultRoot.getChildAt(0)).getUserObject() instanceof Placeholder);
+    }
+
+    /** A host carrying protocol and port is long enough to stretch the menu off-screen. */
+    private static String abbreviate(String host) {
+        return host.length() <= MENU_HOST_CHARS ? host : host.substring(0, MENU_HOST_CHARS - 3) + "...";
     }
 
     private static void copyToClipboard(String text) {

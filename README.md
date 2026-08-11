@@ -10,7 +10,13 @@ During a large assessment I conducted, I wanted a clear view of which servers we
 - Include or exclude file extensions in your search. Use the keyword `none` for requests without an extension.
 - Results are grouped per host in an expandable tree, one match per row.
 - Narrow the results with the `Filter results` box without running the search again.
-- Results can be copied with the standard `ctrl + c` combination or the right-click menu. Copied rows are host and value separated by a tab, so they paste straight into a spreadsheet.
+- Results can be copied from the right-click menu in four ways, so you get only what you asked for:
+  - `Copy` (`ctrl + c`) copies the selected rows as host and value separated by a tab, so they paste straight into a spreadsheet.
+  - `Copy match only` (`ctrl + shift + c`) copies just the matched values, with no host in front of them. Selecting a host copies all of its matches this way.
+  - `Copy all matches for <host>` copies everything found on one host, named in the menu so you can see which. It works from a value row as well as from the host row.
+  - `Copy all results` copies the whole tree.
+  
+  Copying always follows the `Filter results` box, so a filtered view copies only what it shows.
 - Filter only for in-scope items
 
 ## Screenshot
@@ -22,6 +28,13 @@ Searching with regex for the Server header.
 Literal string search for nginx, and exclusion of requests with no extension, js, php, and css.
 
 ## Changelog
+
+- v2.1 (11/08/2026)
+  - The right-click menu on the results now offers four ways to copy instead of two, so you can take only the part you need
+  - `Copy match only` copies the matched values on their own, without the host in front of them. It is also on `ctrl + shift + c`. Selecting a host copies all of its matches this way
+  - `Copy all matches for <host>` copies everything found on a single host. The menu names the host, so you can see which one it will copy, and it works from a match row as well as from the host row — you no longer have to scroll back up to the host to copy its results. The host is copied exactly as it is shown, so it includes the protocol and port when those options are ticked
+  - Copying now always follows the `Filter results` box. A filtered view copies only the rows it is showing, including when you copy a whole host
+  - The extension is now built for Java 17, the version the Burp extension API itself targets. Previously the build used whichever Java version was installed on the machine that compiled it, which could produce a jar that Burp refuses to load, with no tab and nothing in the output log
 
 - v2.0.1 (11/08/2026)
   - Fixed some regular expressions freezing the whole machine, not only Burp. A pattern such as `"\S+something/.*?"` could take minutes on a *single* response, and the extension used every CPU core while it did, so the desktop stopped responding. Burp's own memory usage looked normal throughout, which made it look like a hang rather than a slow search. It was worst on minified JavaScript and JSON, where a response is one very long line
