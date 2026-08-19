@@ -28,7 +28,13 @@ public class Main implements BurpExtension {
         logging.logToOutput("Extension filtering");
         logging.logToOutput("To filter for requests that have no extension use the \"none\" keyword.");
 
-        api.userInterface().registerSuiteTab("History Explorer", new HistoryExplorerGui(api));
+        HistoryExplorerGui gui = new HistoryExplorerGui(api);
+        api.userInterface().registerSuiteTab("History Explorer", gui);
+
+        // A search outlives the tab otherwise. The executor thread is not a daemon and the
+        // Stop button goes away with the tab, so unloading mid-search leaves an expensive
+        // regex scanning history against a dead API, holding cores until Burp exits.
+        extension.registerUnloadingHandler(gui::shutdown);
 
     }
 }

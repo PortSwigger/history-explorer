@@ -42,6 +42,13 @@ public class HistoryExplorerGui extends JPanel {
      */
     private static final int AUTO_EXPAND_LIMIT = 1000;
 
+    /**
+     * How long the result filter waits for the user to stop typing. rebuildTree() walks
+     * every host and value, lowercases both, allocates a node per surviving row and then
+     * reloads the model, so on a large result set running it per keystroke is felt.
+     */
+    private static final int FILTER_DEBOUNCE_MS = 175;
+
     /** Depth of a host row. The root is hidden, so 1 is a host and 2 is one of its matches. */
     private static final int HOST_LEVEL = 1;
 
@@ -197,7 +204,12 @@ public class HistoryExplorerGui extends JPanel {
     /** The last full result set, kept so the result filter can re-derive the tree. */
     private Map<String, List<String>> results = new LinkedHashMap<>();
 
-    private HistoryExplorer historyExplorer;
+    /** Coalesces keystrokes in the result filter into one rebuildTree(). */
+    private final Timer filterDebounce;
+
+    // Assigned on the EDT and read by shutdown() on whatever thread Burp unloads the
+    // extension from, so it cannot be a plain field.
+    private volatile HistoryExplorer historyExplorer;
 
     public HistoryExplorerGui(MontoyaApi api) {
 
@@ -365,20 +377,25 @@ public class HistoryExplorerGui extends JPanel {
 
         resultFilterInput = new JTextField(20);
         resultFilterInput.setToolTipText("Narrow the results below. Matches hosts and values.");
+        filterDebounce = new Timer(FILTER_DEBOUNCE_MS, e -> rebuildTree());
+        filterDebounce.setRepeats(false);
+
+        // restart() rather than rebuildTree(): each keystroke pushes the rebuild back, so
+        // a filter typed at speed costs one pass over the results instead of one per key.
         resultFilterInput.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent e) {
-                rebuildTree();
+                filterDebounce.restart();
             }
 
             @Override
             public void removeUpdate(DocumentEvent e) {
-                rebuildTree();
+                filterDebounce.restart();
             }
 
             @Override
             public void changedUpdate(DocumentEvent e) {
-                rebuildTree();
+                filterDebounce.restart();
             }
         });
 
@@ -467,7 +484,8 @@ public class HistoryExplorerGui extends JPanel {
     public void searchFinished() {
         java.awt.EventQueue.invokeLater(() -> {
             // stopSearch() disables the button while it waits, so re-enable it here too
-            // or a search that finishes mid-stop leaves it dead until the timer fires.
+            // or a stopped search leaves it dead. This is the only place the tab is
+            // handed back, which is what keeps a cancelled search from being overtaken.
             searchBtn.setEnabled(true);
             searchBtn.setText("Search");
             searchProgress.setVisible(false);
@@ -475,6 +493,17 @@ public class HistoryExplorerGui extends JPanel {
         });
     }
 
+    /**
+     * Signals the running search and leaves the tab reading "Stopping..." until it really
+     * has stopped. This used to arm a 2 second timer that re-enabled everything whether or
+     * not the worker had finished. A cancellation slower than that -- proxy().history()
+     * walks the whole history before it returns, however fast the filter rejects items --
+     * then let the user start a second search while the first was still alive, and the
+     * first one's searchFinished() reset the tab to idle underneath it. A third click
+     * would overwrite historyExplorer and leave the second search with nothing holding a
+     * reference to stop it. searchFinished() is now the only thing that hands the tab
+     * back, and HistoryExplorer calls it on every exit path.
+     */
     public void stopSearch() {
         SwingUtilities.invokeLater(() -> {
             searchBtn.setEnabled(false);
@@ -484,21 +513,22 @@ public class HistoryExplorerGui extends JPanel {
             if (historyExplorer != null) {
                 historyExplorer.stopSearch();
             }
-
-            Timer timer = new Timer(2000, new ActionListener() {
-                @Override
-                public void actionPerformed(ActionEvent e) {
-                    SwingUtilities.invokeLater(() -> {
-                        searchBtn.setEnabled(true);
-                        searchBtn.setText("Search");
-                        searchProgress.setVisible(false);
-                        setSearchControlsEnabled(true);
-                    });
-                }
-            });
-            timer.setRepeats(false);
-            timer.start();
         });
+    }
+
+    /**
+     * Cancels whatever is running, for extension unload. Burp calls this off the EDT and
+     * the tab is on its way out, so it touches no widgets: there is nothing left to hand
+     * back to, and the search it is stopping would otherwise outlive the extension.
+     */
+    public void shutdown() {
+
+        filterDebounce.stop();
+
+        HistoryExplorer running = historyExplorer;
+        if (running != null) {
+            running.shutdownNow();
+        }
     }
 
     /**

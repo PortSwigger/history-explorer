@@ -48,6 +48,22 @@ public class FilterHTTPResults implements ProxyHistoryFilter {
             return false;
         }
 
+        try {
+            return keep(requestResponse);
+        } catch (RuntimeException e) {
+            // Unload can land between the check above and any call below, and Burp has
+            // by then invalidated the objects they run on. Throwing here would abort
+            // history() itself. Rethrown while the search is live so a real fault still
+            // surfaces rather than silently dropping items from every result.
+            if (!stopped.getAsBoolean()) {
+                throw e;
+            }
+            return false;
+        }
+    }
+
+    private boolean keep(ProxyHttpRequestResponse requestResponse) {
+
         HttpRequest request = requestResponse.finalRequest();
         if (request == null) {
             return false;

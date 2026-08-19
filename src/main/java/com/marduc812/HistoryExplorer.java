@@ -40,8 +40,19 @@ public class HistoryExplorer {
     static Logging logging;
     HistoryExplorerGui gui;
     static Scope scope;
-    private ExecutorService executorService;
+    // Written on the EDT by the constructor and read by shutdownNow() on whatever
+    // thread Burp unloads the extension from, so it cannot be a plain field.
+    private volatile ExecutorService executorService;
     private volatile boolean stopSearchFlag;
+
+    /**
+     * Set when the extension is unloading, as distinct from the user pressing Stop. Burp
+     * invalidates the objects behind the Montoya API once the unloading handler returns,
+     * and every call on them then throws NullPointerException from inside Burp's own
+     * proxy. So past this point the search must not log, must not read another message
+     * and must not publish results: a user Stop still does all three, an unload does none.
+     */
+    private volatile boolean unloaded;
 
     public HistoryExplorer(MontoyaApi api, HistoryExplorerGui gui, String searchTerm, boolean regExSearch, boolean inScopeSearch ,boolean[] searchStatusCodes, boolean showProtocol, boolean showPort, String includedExtensionsString, String excludedExtensionsString, List<Boolean> httpOptions) {
 
@@ -103,7 +114,12 @@ public class HistoryExplorer {
             } catch (Throwable t) {
                 // submit() parks throwables in a Future nobody reads, so without this
                 // the search dies leaving no trace and the button stuck on "Stop".
-                logging.logToError("Search failed: " + t);
+                // A cancelled search is exempt: shutdownNow() interrupts this thread on
+                // purpose, and the InterruptedException that ends the wait in
+                // processHttpHistory is that cancellation working, not a fault.
+                if (!stopSearchFlag) {
+                    logging.logToError("Search failed: " + t);
+                }
             } finally {
                 gui.searchFinished();
             }
@@ -118,6 +134,29 @@ public class HistoryExplorer {
         stopSearchFlag = true;
     }
 
+    /**
+     * Cancels the search on extension unload, where there is no Stop button left to press
+     * because the tab has gone. Without it the search outlives the extension: the executor
+     * thread is non-daemon and the parallel pass holds SEARCH_THREADS cores, so a
+     * pathological regex keeps burning them for the rest of the Burp session.
+     *
+     * The flag is what actually ends the search -- nothing on the search path tests the
+     * interrupt status -- and shutdownNow() is here to unpark the thread waiting on the
+     * parallel pass in processHttpHistory rather than let it sit there until that drains.
+     */
+    public void shutdownNow() {
+
+        // Before the flag that ends the search, so no thread it releases can get as far
+        // as an API call believing the extension is still loaded.
+        unloaded = true;
+        stopSearch();
+
+        ExecutorService executor = executorService;
+        if (executor != null) {
+            executor.shutdownNow();
+        }
+    }
+
     private boolean isStopped() {
         return stopSearchFlag;
     }
@@ -125,6 +164,13 @@ public class HistoryExplorer {
     private void processHttpHistory(MontoyaApi api, HistoryExplorerGui gui, String searchTerm, Pattern pattern, String requiredLiteral, boolean showProtocol, boolean showPort, boolean searchRequests, boolean searchResponses, FilterHTTPResults filterHTTP) throws Exception {
 
         List<ProxyHttpRequestResponse> httpHistory = api.proxy().history(filterHTTP);
+
+        // An unload during the walk leaves nothing here that is safe to call -- logging
+        // the count alone is an API call, and it throws.
+        if (unloaded) {
+            return;
+        }
+
         Map<String, Set<String>> hostToServersMap = new ConcurrentHashMap<>();
 
         logging.logToOutput("#############\nRecords returned: " + httpHistory.size() + "\n##########\n");
@@ -140,21 +186,37 @@ public class HistoryExplorer {
                     return;
                 }
 
-                HttpRequest request = item.finalRequest();
-                if (request == null) {
-                    return;
-                }
+                try {
+                    HttpRequest request = item.finalRequest();
+                    if (request == null) {
+                        return;
+                    }
 
-                Set<String> matchingValues = collectMatches(item, request, searchTerm, pattern, requiredLiteral, searchRequests, searchResponses, this::isStopped);
-                if (matchingValues.isEmpty()) {
-                    return;
-                }
+                    Set<String> matchingValues = collectMatches(item, request, searchTerm, pattern, requiredLiteral, searchRequests, searchResponses, this::isStopped);
+                    if (matchingValues.isEmpty()) {
+                        return;
+                    }
 
-                String hostString = buildHostLabel(request, showProtocol, showPort);
-                hostToServersMap.computeIfAbsent(hostString, key -> ConcurrentHashMap.newKeySet()).addAll(matchingValues);
+                    String hostString = buildHostLabel(request, showProtocol, showPort);
+                    hostToServersMap.computeIfAbsent(hostString, key -> ConcurrentHashMap.newKeySet()).addAll(matchingValues);
+                } catch (RuntimeException e) {
+                    // An unload can land between the flag check above and any of the calls
+                    // below it, and every one of them is an API call that then throws.
+                    // Swallowed only once the search is stopping, so a genuine fault in a
+                    // live search still tears the pass down and is reported.
+                    if (!stopSearchFlag) {
+                        throw e;
+                    }
+                }
             })).get();
         } finally {
             searchPool.shutdown();
+        }
+
+        // Checked again: the unload may have arrived while the pass was draining. There
+        // is no tab left to publish to and no API left to log with.
+        if (unloaded) {
+            return;
         }
 
         if (stopSearchFlag) {
