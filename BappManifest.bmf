@@ -3,7 +3,7 @@ ExtensionType: 1
 Name: History Explorer
 RepoName: history-explorer
 ScreenVersion: 2.1.0
-SerialVersion: 6
+SerialVersion: 7
 MinPlatformVersion: 10
 ProOnly: True
 Author: marduc812
