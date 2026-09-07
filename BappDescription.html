@@ -1,12 +1,34 @@
-<p>Assists filtering search results by host. Groups the matches under the host they came from, for easier viewing of data.</p>
+<p>
+	History Explorer searches the proxy history for a literal string or a regular expression and groups every match
+	under the host it came from, so one search answers questions such as which servers are running which software
+	without opening each request in turn. Matches are shown in an expandable per-host tree, one match per row, and can
+	be copied out of the results in whichever shape you need them.
+</p>
 
-<p>Features:</p>
+<h2>Features</h2>
 <ul>
-	<li>Search using a literal string or a regex by selecting the "Regular expression" checkbox.</li>
-	<li>Choose the type of "status code" to include in the history search.</li>
-	<li>Include or exclude file extensions in your search. Use the keyword "none" for requests without an extension.</li>
-	<li>Results are grouped per host in an expandable tree, with one match per row.</li>
-	<li>Narrow the results with the "Filter results" box without running the search again.</li>
-	<li>Results can be copied with the standard "ctrl + c" combination or the right-click menu.</li>
-	<li>Filter only for in-scope items.</li>
+	<li>See every match grouped under its host, one per row, with a count per host.</li>
+	<li>Search with a literal string or a regular expression, over requests, responses, or both.</li>
+	<li>Cut the history down before searching: status code class, in-scope items only, and included or excluded file
+		extensions (<code class="InlineCode">none</code> for paths with no extension).</li>
+	<li>Narrow the results in place as you type, without running the search again.</li>
+	<li>Copy exactly what you need: host and value tab separated for a spreadsheet, the matched values alone, one host's
+		matches, or the whole tree. Copies follow the filter.</li>
+	<li>Show or hide the protocol and port in the host label.</li>
+	<li>Keep working while a search runs, and stop it instantly.</li>
 </ul>
+
+<h2>Usage</h2>
+<ol>
+	<li>Open the History Explorer tab and enter a search term, for example <code class="InlineCode">Server: .*</code>.
+		Tick the Regular expression option to treat the term as a regex rather than as text.</li>
+	<li>Choose whether to search requests, responses, or both, and restrict the history by status code, scope, or file
+		extension. Extensions are comma separated, for example <code class="InlineCode">js, json</code>.</li>
+	<li>Press Search. When the search completes, the matches appear grouped under their hosts; press Stop at any point
+		to end it early and keep what has been found.</li>
+	<li>Type in the Filter results box to narrow the tree, and use Expand all or Collapse all to move through large
+		result sets.</li>
+	<li>Right-click a host or a match to copy, or press <code class="InlineCode">ctrl + c</code> for the selection and
+		<code class="InlineCode">ctrl + shift + c</code> for the matched values alone.
+	</li>
+</ol>
