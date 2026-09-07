@@ -3,10 +3,22 @@ plugins {
 }
 
 group = 'com.marduc812'
-version = '1.0-SNAPSHOT'
+version = '2.1'
 
 repositories {
     mavenCentral()
+}
+
+/**
+ * Burp runs extensions on the JRE it bundles, and a class file newer than that JRE is
+ * rejected outright with UnsupportedClassVersionError — the extension never initialises,
+ * so there is no tab and not even a line in the output log. Without this the target is
+ * whatever JDK happened to run Gradle, which makes the jar's minimum Java version an
+ * accident of the build machine; that matters doubly here because the BApp Store builds
+ * from source on PortSwigger's own infrastructure. 17 is the Montoya API's own baseline.
+ */
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
 }
 
 dependencies {

@@ -2,12 +2,12 @@ Uuid: 18d22d6559364e30ad44b506604822f9
 ExtensionType: 1
 Name: History Explorer
 RepoName: history-explorer
-ScreenVersion: 1.2
-SerialVersion: 2
+ScreenVersion: 2.1
+SerialVersion: 5
 MinPlatformVersion: 10
 ProOnly: True
 Author: marduc812
 ShortDescription: Filter search results per host.
-EntryPoint: build/libs/HistoryExplorer-1.0-SNAPSHOT.jar
+EntryPoint: build/libs/HistoryExplorer-2.1.jar
 BuildCommand: ./gradlew jar
 SupportedProducts: Pro
